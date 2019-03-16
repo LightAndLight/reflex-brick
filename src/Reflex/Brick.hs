@@ -20,7 +20,7 @@ import Control.Monad (void, forever)
 import Data.Maybe (fromMaybe)
 
 import Control.Monad.Trans (liftIO)
-import Control.Concurrent (forkIO, MVar, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.STM (atomically)
 import Control.Concurrent.STM.TQueue (TQueue, newTQueueIO, readTQueue, writeTQueue)
 
@@ -41,17 +41,17 @@ import Reflex.Brick.Events
 
 data ReflexBrickEvents e n =
   ReflexBrickEvents {
-    rbeToReflex   :: MVar (BrickEvent n e)
+    rbeToReflex   :: TQueue (BrickEvent n e)
   , rbeFromReflex :: TQueue (RBNext (ReflexBrickAppState n))
   }
 
 mkReflexApp :: EventM n e -> IO (ReflexBrickEvents e n, App (ReflexBrickAppState n) e n)
 mkReflexApp initial = do
-  (toReflex, fromReflex) <- (,) <$> newEmptyMVar <*> newTQueueIO
+  (toReflex, fromReflex) <- (,) <$> newTQueueIO <*> newTQueueIO
   let
     process _ e = do
       x <- liftIO $ do
-        putMVar toReflex e
+        atomically (writeTQueue toReflex e)
         atomically (readTQueue fromReflex)
       case x of
         RBContinue s -> continue s
@@ -126,7 +126,7 @@ runReflexBrickApp initial mGenE initialState fn = do
     fromMaybe (pure ()) $ generate <$> mbChan <*> mGenE
 
     void . liftIO . forkIO . forever $ do
-      e <- takeMVar (rbeToReflex events)
+      e <- atomically (readTQueue $ rbeToReflex events)
       onEventIn e
 
     rba <- fn (rbEventSelector eEventIn)
