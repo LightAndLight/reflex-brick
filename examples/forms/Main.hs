@@ -116,18 +116,13 @@ combineFieldsWith f a b =
   , _fieldNames = _fieldNames a <> _fieldNames b
   }
 
-newtype VFormField t n a = VFormField { unVFormField :: FormField t n a }
-  deriving Functor
-newtype HFormField t n a = HFormField { unHFormField :: FormField t n a }
-  deriving Functor
-
-fieldFocusRing ::
+dynFocusRing ::
   (Reflex t, MonadHold t m, MonadFix m) =>
   Event t () -> -- ^ previous
   Event t () -> -- ^ next
   [n] -> -- ^ the set of fields
   m (Dynamic t (FocusRing n))
-fieldFocusRing ePrev eNext fs = do
+dynFocusRing ePrev eNext fs = do
   let initial = focusRing fs
   foldDyn
     ($)
@@ -137,7 +132,11 @@ fieldFocusRing ePrev eNext fs = do
 data Form t n m a where
   FormPure :: a -> Form t n m a
   FormMap :: (a -> b) -> Form t n m a -> Form t n m b
-  FormLift :: (Dynamic t (Maybe n) -> m (FormField t n a)) -> Form t n m a
+  FormLift ::
+    (EventSelector t RBVtyEvent ->
+     Dynamic t (Maybe n) ->
+     m (FormField t n a)) ->
+    Form t n m a
   FormStyle :: (Widget n -> Widget n) -> Form t n m a -> Form t n m a
   FormVert :: Form t n m (a -> b) -> Form t n m a -> Form t n m b
   FormHoriz :: Form t n m (a -> b) -> Form t n m a -> Form t n m b
@@ -152,11 +151,18 @@ infixl 4 <*>+
 (<*>=) = FormVert
 infixl 4 <*>=
 
-field :: (Dynamic t (Maybe n) -> m (FormField t n a)) -> Form t n m a
+field ::
+  (EventSelector t RBVtyEvent -> Dynamic t (Maybe n) -> m (FormField t n a)) ->
+  Form t n m a
 field = FormLift
 
 styled :: (Widget n -> Widget n) -> Form t n m a -> Form t n m a
 styled = FormStyle
+
+(@@=) :: (Widget n -> Widget n) -> Form t n m a -> Form t n m a
+(@@=) = styled
+
+infixr 5 @@=
 
 besides :: [Form t n m a] -> Form t n m [a]
 besides [] = FormPure []
@@ -171,16 +177,17 @@ makeForm ::
   ( Reflex t, MonadHold t m, MonadFix m
   , Eq n
   ) =>
-  AttrMap ->
-  Event t () ->
-  Event t () ->
-  Form t n m a ->
+  EventSelector t RBVtyEvent -> -- ^ terminal input events
+  AttrMap -> -- ^ styling
+  Event t () -> -- ^ cycle forward through form
+  Event t () -> -- ^ cycle forward through form
+  Form t n m a -> -- ^ the form
   m (Dynamic t a, Dynamic t (Maybe n), Dynamic t (ReflexBrickAppState n))
-makeForm style ePrev eNext form = do
+makeForm eVtyEvent style ePrev eNext form = do
   rec
     let dFocus = focusGetCurrent <$> dFocusRing
-    ff <- runReaderT (go form) dFocus
-    dFocusRing <- fieldFocusRing ePrev eNext $ _fieldNames ff
+    ff <- runReaderT (go form) (eVtyEvent, dFocus)
+    dFocusRing <- dynFocusRing ePrev eNext $ _fieldNames ff
   pure $
     ( _fieldData ff
     , dFocus
@@ -197,11 +204,11 @@ makeForm style ePrev eNext form = do
     go ::
       forall x.
       Form t n m x ->
-      ReaderT (Dynamic t (Maybe n)) m (FormField t n x)
+      ReaderT (EventSelector t RBVtyEvent, Dynamic t (Maybe n)) m (FormField t n x)
     go (FormPure a) = pure $ emptyField a
     go (FormMap f ma) = fmap f <$> go ma
     go (FormLift ma) = do
-      ask >>= lift . ma
+      ask >>= lift . uncurry ma
     go (FormStyle f ma) = do
       a <- go ma
       pure $ a & fieldWidget.mapped %~ f
@@ -213,14 +220,14 @@ textFieldBase ::
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n, Show n
   ) =>
-  EventSelector t RBVtyEvent -> -- ^ terminal events
   ([Text] -> Widget n) -> -- ^ how to render contents
   n -> -- ^ widget name (must be unique)
   Maybe Text -> -- ^ initial contents
   Maybe Int -> -- ^ line limit
+  EventSelector t RBVtyEvent -> -- ^ terminal events
   Dynamic t (Maybe n) -> -- ^ current focus
   m (FormField t n [Text])
-textFieldBase eVtyEvent renderLines name def limit dFocus = do
+textFieldBase renderLines name def limit eVtyEvent dFocus = do
   let initial = editorText name limit (fromMaybe mempty def)
   dInFocus <- holdUniqDyn $ (== Just name) <$> dFocus
   dEditor <-
@@ -243,15 +250,14 @@ textField ::
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n, Show n
   ) =>
-  EventSelector t RBVtyEvent -> -- ^ terminal events
   n -> -- ^ widget name (must be unique)
   Maybe Text -> -- ^ initial contents
   Maybe Int -> -- ^ line limit
+  EventSelector t RBVtyEvent -> -- ^ terminal events
   Dynamic t (Maybe n) -> -- ^ current focus
   m (FormField t n [Text])
-textField eVtyEvent name def limit =
+textField name def limit =
   textFieldBase
-    eVtyEvent
     (txt . Text.intercalate "\n")
     name
     def
@@ -262,19 +268,19 @@ passwordField ::
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n, Show n
   ) =>
-  EventSelector t RBVtyEvent -> -- ^ terminal events
   n -> -- ^ widget name (must be unique)
   Maybe Text -> -- ^ initial contents
+  EventSelector t RBVtyEvent -> -- ^ terminal events
   Dynamic t (Maybe n) -> -- ^ current focus
   m (FormField t n Text)
-passwordField eVtyEvent name def =
+passwordField name def eVtyEvent =
   (fmap Text.concat <$>) .
   textFieldBase
-    eVtyEvent
     (txt . stars)
     name
     def
     (Just 1)
+    eVtyEvent
   where
     stars s = Text.replicate (Text.length $ Text.concat s) (Text.singleton '*')
 
@@ -282,11 +288,11 @@ radioField ::
   ( Reflex t, MonadHold t m
   , Eq n
   ) =>
-  EventSelector t RBVtyEvent -> -- ^ terminal events
   NonEmpty (n, a, Text) -> -- ^ selections
+  EventSelector t RBVtyEvent -> -- ^ terminal events
   Dynamic t (Maybe n) -> -- ^ current focus
   m (FormField t n a)
-radioField eVtyEvent choices dFocus = do
+radioField choices eVtyEvent dFocus = do
   let
     names = foldr (\a b -> (^.) a _1 : b) [] choices
     initial = let x = NonEmpty.head choices in (x ^. _1, x ^. _2)
@@ -326,12 +332,12 @@ checkboxField ::
   ( Reflex t, MonadHold t m, MonadFix m
   , Eq n
   ) =>
-  EventSelector t RBVtyEvent -> -- ^ terminal events
   n -> -- ^ name
   Text -> -- ^ label
+  EventSelector t RBVtyEvent -> -- ^ terminal events
   Dynamic t (Maybe n) -> -- ^ current focus
   m (FormField t n Bool)
-checkboxField eVtyEvent name label dFocus = do
+checkboxField name label eVtyEvent dFocus = do
   let eSpace = select eVtyEvent (RBKey $ Vty.KChar ' ')
 
   let dHighlighted = (==Just name) <$> dFocus
@@ -367,11 +373,11 @@ listField ::
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n
   ) =>
-  EventSelector t RBVtyEvent -> -- ^ terminal events
   [(n, Text, a)] -> -- ^ choices
+  EventSelector t RBVtyEvent -> -- ^ terminal events
   Dynamic t (Maybe n) -> -- ^ current focus
   m (FormField t n [a])
-listField eVtyEvent choices eFocus = do
+listField choices eVtyEvent eFocus = do
   let
     names = fmap (^. _1) choices
     eSpace = select eVtyEvent . RBKey $ Vty.KChar ' '
@@ -464,17 +470,14 @@ network eEvent = do
 
   rec
     (dData, _, dAppState) <-
-      makeForm styling ePrev eNext $
+      makeForm eVtyEvent styling ePrev eNext $
       (,,,,) <$>
-      styled border (field $ textField eVtyEvent FormName Nothing (Just 1)) <*>=
-      styled border (field $ passwordField eVtyEvent FormPassword Nothing) <*>=
-      styled
-        (padBottom $ Pad 1)
-        (field (radioField eVtyEvent [(FormX, X, "X"), (FormY, Y, "Y"), (FormZ, Z, "Z")])) <*>=
-      field (checkboxField eVtyEvent FormQuestion "???") <*>=
-      field
-        (listField eVtyEvent
-         [(FormListX, "X", X), (FormListY, "Y", Y), (FormListZ, "Z", Z)])
+      border @@= field (textField FormName Nothing (Just 1)) <*>=
+      border @@= field (passwordField FormPassword Nothing) <*>=
+      padBottom (Pad 1) @@=
+        field (radioField [(FormX, X, "X"), (FormY, Y, "Y"), (FormZ, Z, "Z")]) <*>=
+      field (checkboxField FormQuestion "???") <*>=
+      field (listField  [(FormListX, "X", X), (FormListY, "Y", Y), (FormListZ, "Z", Z)])
 
   pure $
     ReflexBrickApp
