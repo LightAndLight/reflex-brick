@@ -33,6 +33,7 @@ import Control.Monad (guard)
 import Control.Monad.Fix (MonadFix)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Reader (ReaderT, runReaderT, ask)
+import Data.Foldable (foldl')
 import Data.Function ((&))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Maybe (isJust, fromMaybe)
@@ -45,7 +46,6 @@ import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Text.Zipper as Zipper
-import qualified Data.Vector as Vector
 import qualified Graphics.Vty.Attributes as Vty
 import qualified Graphics.Vty.Input.Events as Vty
 
@@ -374,7 +374,6 @@ listField ::
 listField eVtyEvent choices eFocus = do
   let
     names = fmap (^. _1) choices
-    choicesV = Vector.fromList choices
     eSpace = select eVtyEvent . RBKey $ Vty.KChar ' '
 
     dSelected = (>>= \n -> if n `elem` names then Just n else Nothing) <$> eFocus
@@ -398,21 +397,21 @@ listField eVtyEvent choices eFocus = do
     FormField
     { _fieldData =
       (\ixs ->
-         Vector.foldr
+         foldr
            (\(n, _, a) b -> if n `Set.member` ixs then a : b else b)
            []
-           choicesV) <$>
+           choices) <$>
       dIxs
     , _fieldWidget =
       (\msel f ixs ->
-         Vector.foldl'
+         foldl'
            (\b (n, l, _) ->
               b <=>
               addStyle
                 (f && Just n == msel)
                 (txt $ (if n `Set.member` ixs then "+ " else "- ") <> l))
            emptyWidget
-           choicesV) <$>
+           choices) <$>
       dSelected <*>
       dInFocus <*>
       dIxs

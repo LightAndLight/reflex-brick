@@ -80,7 +80,6 @@ executable forms
                      , text
                      , text-zipper
                      , transformers
-                     , vector
                      , vty
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   hs-source-dirs:      examples/forms
