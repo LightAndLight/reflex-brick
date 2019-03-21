@@ -73,6 +73,7 @@ executable forms
                      , brick             >= 0.37 && < 0.47
                      , reflex            >= 0.5 && < 0.6
                      , reflex-brick
+                     , containers
                      , microlens
                      , microlens-th
                      , mtl

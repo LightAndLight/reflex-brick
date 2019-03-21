@@ -18,10 +18,10 @@ This will likely be factored out into a library, but I'm leaving it here for now
 import Reflex
 import Reflex.Brick
 
-import Brick.AttrMap (AttrMap, attrMap)
+import Brick.AttrMap (AttrMap, AttrName, attrMap)
 import Brick.Focus
   (FocusRing, focusRing, focusRingCursor, focusNext, focusPrev, focusGetCurrent)
-import Brick.Forms (focusedFormInputAttr)
+import Brick.Forms (formAttr, focusedFormInputAttr)
 import Brick.Widgets.Border (border)
 import Brick.Widgets.Core
   ((<=>), (<+>), emptyWidget, txt, vLimit, vBox, withDefAttr, showCursor, padBottom)
@@ -36,11 +36,13 @@ import Control.Monad.Reader (ReaderT, runReaderT, ask)
 import Data.Function ((&))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Maybe (fromMaybe)
+import Data.Set (Set)
 import Data.Text (Text)
 import Lens.Micro ((%~), (^.), _1, _2, mapped, _last)
 import Lens.Micro.TH (makeLenses)
 
 import qualified Data.List.NonEmpty as NonEmpty
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Text.Zipper as Zipper
 import qualified Data.Vector as Vector
@@ -360,6 +362,9 @@ checkboxField eVtyEvent name label dFocus = do
 
     check c = if c then "[x] " else "[ ] "
 
+listItemSelectedAttr :: AttrName
+listItemSelectedAttr = formAttr <> "listSelected"
+
 listField ::
   forall t n m a.
   ( Reflex t, MonadHold t m, MonadFix m
@@ -369,13 +374,14 @@ listField ::
   n -> -- ^ name
   [(Text, a)] -> -- ^ choices
   Dynamic t (Maybe n) -> -- ^ current focus
-  m (FormField t n a)
+  m (FormField t n [a])
 listField eVtyEvent name choices eFocus = do
   let
     choicesV = Vector.fromList choices
     minIx = 0
     maxIx = Vector.length choicesV - 1
     dInFocus = (==Just name) <$> eFocus
+    eSpace = select eVtyEvent . RBKey $ Vty.KChar ' '
     eUp =
       gate (current dInFocus) $
       leftmost
@@ -388,35 +394,54 @@ listField eVtyEvent name choices eFocus = do
       [ select eVtyEvent $ RBKey Vty.KDown
       , select eVtyEvent . RBKey $ Vty.KChar 'j'
       ]
+
+  dSelected :: Dynamic t Int <-
+    foldDyn ($) 0 $
+    mergeWith
+      (\_ _ -> id)
+      [ (\old -> if old > minIx then old-1 else old) <$ eUp
+      , (\old -> if old < maxIx then old+1 else old) <$ eDown
+      ]
+
   rec
-    dIx :: Dynamic t Int <-
-      holdDyn 0 $
-      mergeWith
-        (\a b -> a + b `div` 2)
-        [ attachWithMaybe
-            (\ix _ -> if ix > minIx then Just (ix-1) else Nothing)
-            (current dIx)
-            eUp
-        , attachWithMaybe
-            (\ix _ -> if ix < maxIx then Just (ix+1) else Nothing)
-            (current dIx)
-            eDown
-        ]
+    dIxs :: Dynamic t (Set Int) <-
+      holdDyn mempty $
+      (\ix ixs ->
+         if ix `Set.member` ixs
+         then Set.delete ix ixs
+         else Set.insert ix ixs) <$>
+      current dSelected <*>
+      current dIxs <@
+      eSpace
+
   pure $
     FormField
-    { _fieldData = snd . (choicesV Vector.!) <$> dIx
+    { _fieldData =
+      (\ixs ->
+         Vector.ifoldr
+           (\n (_, a) b -> if n `Set.member` ixs then a : b else b)
+           []
+           choicesV) <$>
+      dIxs
     , _fieldWidget =
-      (\ix ->
+      (\sel f ixs ->
          Vector.ifoldl'
-           (\b ix' (l, _) -> b <=> addStyle ix ix' (txt l))
+           (\b ix (l, _) ->
+              b <=>
+              addStyle
+                (f && ix == sel)
+                (txt $ (if ix `Set.member` ixs then "+ " else "- ") <> l))
            emptyWidget
            choicesV) <$>
-      dIx
+      dSelected <*>
+      dInFocus <*>
+      dIxs
     , _fieldNames = [name]
     }
+
   where
-    addStyle ix ix' =
-      if ix == ix'
+    addStyle b =
+      if b
       then withDefAttr focusedFormInputAttr
       else id
 
