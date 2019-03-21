@@ -18,13 +18,13 @@ This will likely be factored out into a library, but I'm leaving it here for now
 import Reflex
 import Reflex.Brick
 
-import Brick.AttrMap (AttrMap, AttrName, attrMap)
+import Brick.AttrMap (AttrMap, attrMap)
 import Brick.Focus
   (FocusRing, focusRing, focusRingCursor, focusNext, focusPrev, focusGetCurrent)
-import Brick.Forms (formAttr, focusedFormInputAttr)
+import Brick.Forms (focusedFormInputAttr)
 import Brick.Widgets.Border (border)
 import Brick.Widgets.Core
-  ((<=>), (<+>), emptyWidget, txt, vLimit, vBox, withDefAttr, showCursor, padBottom)
+  ((<=>), (<+>), emptyWidget, txt, vBox, withDefAttr, showCursor, padBottom)
 import Brick.Widgets.Edit
   (Editor, editorText, editContentsL, renderEditor, getEditContents)
 import Brick.Types (Widget, Location(..), Padding(..))
@@ -35,7 +35,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Reader (ReaderT, runReaderT, ask)
 import Data.Function ((&))
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (isJust, fromMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
 import Lens.Micro ((%~), (^.), _1, _2, mapped, _last)
@@ -362,81 +362,61 @@ checkboxField eVtyEvent name label dFocus = do
 
     check c = if c then "[x] " else "[ ] "
 
-listItemSelectedAttr :: AttrName
-listItemSelectedAttr = formAttr <> "listSelected"
-
 listField ::
   forall t n m a.
   ( Reflex t, MonadHold t m, MonadFix m
-  , Eq n
+  , Ord n
   ) =>
   EventSelector t RBVtyEvent -> -- ^ terminal events
-  n -> -- ^ name
-  [(Text, a)] -> -- ^ choices
+  [(n, Text, a)] -> -- ^ choices
   Dynamic t (Maybe n) -> -- ^ current focus
   m (FormField t n [a])
-listField eVtyEvent name choices eFocus = do
+listField eVtyEvent choices eFocus = do
   let
+    names = fmap (^. _1) choices
     choicesV = Vector.fromList choices
-    minIx = 0
-    maxIx = Vector.length choicesV - 1
-    dInFocus = (==Just name) <$> eFocus
     eSpace = select eVtyEvent . RBKey $ Vty.KChar ' '
-    eUp =
-      gate (current dInFocus) $
-      leftmost
-      [ select eVtyEvent $ RBKey Vty.KUp
-      , select eVtyEvent . RBKey $ Vty.KChar 'k'
-      ]
-    eDown =
-      gate (current dInFocus) $
-      leftmost
-      [ select eVtyEvent $ RBKey Vty.KDown
-      , select eVtyEvent . RBKey $ Vty.KChar 'j'
-      ]
 
-  dSelected :: Dynamic t Int <-
-    foldDyn ($) 0 $
-    mergeWith
-      (\_ _ -> id)
-      [ (\old -> if old > minIx then old-1 else old) <$ eUp
-      , (\old -> if old < maxIx then old+1 else old) <$ eDown
-      ]
+    dSelected = (>>= \n -> if n `elem` names then Just n else Nothing) <$> eFocus
+    dInFocus = isJust <$> dSelected
 
   rec
-    dIxs :: Dynamic t (Set Int) <-
+    dIxs :: Dynamic t (Set n) <-
       holdDyn mempty $
-      (\ix ixs ->
-         if ix `Set.member` ixs
-         then Set.delete ix ixs
-         else Set.insert ix ixs) <$>
+      (\mix ixs ->
+         case mix of
+           Nothing -> ixs
+           Just ix ->
+             if ix `Set.member` ixs
+             then Set.delete ix ixs
+             else Set.insert ix ixs) <$>
       current dSelected <*>
       current dIxs <@
-      eSpace
+      gate (current dInFocus) eSpace
 
   pure $
     FormField
     { _fieldData =
       (\ixs ->
-         Vector.ifoldr
-           (\n (_, a) b -> if n `Set.member` ixs then a : b else b)
+         Vector.foldr
+           (\(n, _, a) b -> if n `Set.member` ixs then a : b else b)
            []
            choicesV) <$>
       dIxs
     , _fieldWidget =
-      (\sel f ixs ->
-         Vector.ifoldl'
-           (\b ix (l, _) ->
+      (\msel f ixs ->
+         Vector.foldl'
+           (\b (n, l, _) ->
               b <=>
               addStyle
-                (f && ix == sel)
-                (txt $ (if ix `Set.member` ixs then "+ " else "- ") <> l))
+                (f && Just n == msel)
+                (txt $ (if n `Set.member` ixs then "+ " else "- ") <> l))
            emptyWidget
            choicesV) <$>
       dSelected <*>
       dInFocus <*>
       dIxs
-    , _fieldNames = [name]
+    , _fieldNames = names
     }
 
   where
@@ -452,7 +432,9 @@ data FormId
   | FormY
   | FormZ
   | FormQuestion
-  | FormList
+  | FormListX
+  | FormListY
+  | FormListZ
   deriving (Eq, Show, Ord)
 
 data C = X | Y | Z
@@ -482,7 +464,7 @@ network eEvent = do
     eQuit = () <$ select eEvent (RBVtyEvent $ RBKey Vty.KEnter)
 
   rec
-    (dData, dFocus, dAppState) <-
+    (dData, _, dAppState) <-
       makeForm styling ePrev eNext $
       (,,,,) <$>
       styled border (field $ textField eVtyEvent FormName Nothing (Just 1)) <*>=
@@ -491,7 +473,9 @@ network eEvent = do
         (padBottom $ Pad 1)
         (field (radioField eVtyEvent [(FormX, X, "X"), (FormY, Y, "Y"), (FormZ, Z, "Z")])) <*>=
       field (checkboxField eVtyEvent FormQuestion "???") <*>=
-      field (listField eVtyEvent FormList [("X", X), ("Y", Y), ("Z", Z)])
+      field
+        (listField eVtyEvent
+         [(FormListX, "X", X), (FormListY, "Y", Y), (FormListZ, "Z", Z)])
 
   pure $
     ReflexBrickApp
