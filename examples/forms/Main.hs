@@ -39,10 +39,11 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Lens.Micro ((%~), (^.), _1, _2, mapped, _last)
 import Lens.Micro.TH (makeLenses)
-import qualified Data.Text.Zipper as Zipper
 
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Text as Text
+import qualified Data.Text.Zipper as Zipper
+import qualified Data.Vector as Vector
 import qualified Graphics.Vty.Attributes as Vty
 import qualified Graphics.Vty.Input.Events as Vty
 
@@ -359,6 +360,66 @@ checkboxField eVtyEvent name label dFocus = do
 
     check c = if c then "[x] " else "[ ] "
 
+listField ::
+  forall t n m a.
+  ( Reflex t, MonadHold t m, MonadFix m
+  , Eq n
+  ) =>
+  EventSelector t RBVtyEvent -> -- ^ terminal events
+  n -> -- ^ name
+  [(Text, a)] -> -- ^ choices
+  Dynamic t (Maybe n) -> -- ^ current focus
+  m (FormField t n a)
+listField eVtyEvent name choices eFocus = do
+  let
+    choicesV = Vector.fromList choices
+    minIx = 0
+    maxIx = Vector.length choicesV - 1
+    dInFocus = (==Just name) <$> eFocus
+    eUp =
+      gate (current dInFocus) $
+      leftmost
+      [ select eVtyEvent $ RBKey Vty.KUp
+      , select eVtyEvent . RBKey $ Vty.KChar 'k'
+      ]
+    eDown =
+      gate (current dInFocus) $
+      leftmost
+      [ select eVtyEvent $ RBKey Vty.KDown
+      , select eVtyEvent . RBKey $ Vty.KChar 'j'
+      ]
+  rec
+    dIx :: Dynamic t Int <-
+      holdDyn 0 $
+      mergeWith
+        (\a b -> a + b `div` 2)
+        [ attachWithMaybe
+            (\ix _ -> if ix > minIx then Just (ix-1) else Nothing)
+            (current dIx)
+            eUp
+        , attachWithMaybe
+            (\ix _ -> if ix < maxIx then Just (ix+1) else Nothing)
+            (current dIx)
+            eDown
+        ]
+  pure $
+    FormField
+    { _fieldData = snd . (choicesV Vector.!) <$> dIx
+    , _fieldWidget =
+      (\ix ->
+         Vector.ifoldl'
+           (\b ix' (l, _) -> b <=> addStyle ix ix' (txt l))
+           emptyWidget
+           choicesV) <$>
+      dIx
+    , _fieldNames = [name]
+    }
+  where
+    addStyle ix ix' =
+      if ix == ix'
+      then withDefAttr focusedFormInputAttr
+      else id
+
 data FormId
   = FormName
   | FormPassword
@@ -366,6 +427,7 @@ data FormId
   | FormY
   | FormZ
   | FormQuestion
+  | FormList
   deriving (Eq, Show, Ord)
 
 data C = X | Y | Z
@@ -397,13 +459,14 @@ network eEvent = do
   rec
     (dData, dFocus, dAppState) <-
       makeForm styling ePrev eNext $
-      (,,,) <$>
+      (,,,,) <$>
       styled border (field $ textField eVtyEvent FormName Nothing (Just 1)) <*>=
       styled border (field $ passwordField eVtyEvent FormPassword Nothing) <*>=
       styled
         (padBottom $ Pad 1)
         (field (radioField eVtyEvent [(FormX, X, "X"), (FormY, Y, "Y"), (FormZ, Z, "Z")])) <*>=
-      field (checkboxField eVtyEvent FormQuestion "???")
+      field (checkboxField eVtyEvent FormQuestion "???") <*>=
+      field (listField eVtyEvent FormList [("X", X), ("Y", Y), ("Z", Z)])
 
   pure $
     ReflexBrickApp
