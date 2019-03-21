@@ -147,14 +147,33 @@ instance Functor (Form t n m) where; fmap = FormMap
 (<*>+) = FormHoriz
 infixl 4 <*>+
 
+(<*+) :: Form t n m a -> Form t n m b -> Form t n m a
+(<*+) a b = const <$> a <*>+ b
+infixl 4 <*+
+
+(*>+) :: Form t n m a -> Form t n m b -> Form t n m b
+(*>+) a b = const id <$> a <*>+ b
+infixl 4 *>+
+
 (<*>=) :: Form t n m (a -> b) -> Form t n m a -> Form t n m b
 (<*>=) = FormVert
 infixl 4 <*>=
 
-field ::
+(<*=) :: Form t n m a -> Form t n m b -> Form t n m a
+(<*=) a b = const <$> a <*>= b
+infixl 4 <*=
+
+(*>=) :: Form t n m a -> Form t n m b -> Form t n m b
+(*>=) a b = const id <$> a <*>= b
+infixl 4 *>=
+
+fieldM ::
   (EventSelector t RBVtyEvent -> Dynamic t (Maybe n) -> m (FormField t n a)) ->
   Form t n m a
-field = FormLift
+fieldM = FormLift
+
+field :: Applicative m => FormField t n a -> Form t n m a
+field f = fieldM (\_ _ -> pure f)
 
 styled :: (Widget n -> Widget n) -> Form t n m a -> Form t n m a
 styled = FormStyle
@@ -413,7 +432,7 @@ listField choices eVtyEvent eFocus = do
          foldl'
            (\b (n, l, _) ->
               b <=>
-              addStyle
+              addStyle n
                 (f && Just n == msel)
                 (txt $ (if n `Set.member` ixs then "+ " else "- ") <> l))
            emptyWidget
@@ -425,10 +444,39 @@ listField choices eVtyEvent eFocus = do
     }
 
   where
+    addStyle n b =
+      if b
+      then showCursor n (Location (0, 0)) . withDefAttr focusedFormInputAttr
+      else id
+
+makeButton ::
+  forall t n m.
+  ( Reflex t, MonadHold t m, MonadFix m
+  , Eq n
+  ) =>
+  n -> -- ^ name
+  Text -> -- ^ value
+  EventSelector t RBVtyEvent -> -- ^ terminal inputs
+  Dynamic t (Maybe n) -> -- ^ current focus
+  m (Event t (), FormField t n ())
+makeButton name value eVtyEvent dFocus =
+  pure
+  ( gate ((==Just name) <$> current dFocus) eEnter
+  , FormField
+    { _fieldData = pure ()
+    , _fieldWidget =
+      (\f -> addStyle (f == Just name) (txt $ "[" <> value <> "]")) <$>
+      dFocus
+    , _fieldNames = [name]
+    }
+  )
+  where
     addStyle b =
       if b
       then withDefAttr focusedFormInputAttr
       else id
+
+    eEnter = () <$ select eVtyEvent (RBKey Vty.KEnter)
 
 data FormId
   = FormName
@@ -440,6 +488,7 @@ data FormId
   | FormListX
   | FormListY
   | FormListZ
+  | FormSubmit
   deriving (Eq, Show, Ord)
 
 data C = X | Y | Z
@@ -466,18 +515,21 @@ network eEvent = do
       fmapMaybe
         (guard . null)
         (select eEvent (RBVtyEvent . RBKey $ Vty.KChar '\t'))
-    eQuit = () <$ select eEvent (RBVtyEvent $ RBKey Vty.KEnter)
 
   rec
-    (dData, _, dAppState) <-
+    (eSubmit, button) <- makeButton FormSubmit "submit" eVtyEvent dFocus
+    (dData, dFocus, dAppState) <-
       makeForm eVtyEvent styling ePrev eNext $
       (,,,,) <$>
-      border @@= field (textField FormName Nothing (Just 1)) <*>=
-      border @@= field (passwordField FormPassword Nothing) <*>=
+      border @@= fieldM (textField FormName Nothing (Just 1)) <*>=
+      border @@= fieldM (passwordField FormPassword Nothing) <*>=
       padBottom (Pad 1) @@=
-        field (radioField [(FormX, X, "X"), (FormY, Y, "Y"), (FormZ, Z, "Z")]) <*>=
-      field (checkboxField FormQuestion "???") <*>=
-      field (listField  [(FormListX, "X", X), (FormListY, "Y", Y), (FormListZ, "Z", Z)])
+        fieldM (radioField [(FormX, X, "X"), (FormY, Y, "Y"), (FormZ, Z, "Z")]) <*>=
+      fieldM (checkboxField FormQuestion "???") <*>=
+      fieldM (listField [(FormListX, "X", X), (FormListY, "Y", Y), (FormListZ, "Z", Z)]) <*=
+      field button
+
+  let eQuit = eSubmit
 
   pure $
     ReflexBrickApp
