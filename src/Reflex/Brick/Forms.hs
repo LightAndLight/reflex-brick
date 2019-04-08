@@ -61,8 +61,10 @@ import Control.Monad.Fix (MonadFix)
 import Control.Monad.Reader (ReaderT, runReaderT, ask)
 import Control.Monad.Trans (lift)
 import Data.Bifunctor (first)
+import Data.Dependent.Map (DMap)
 import Data.Foldable (foldl')
 import Data.Function ((&))
+import Data.Functor.Identity (Identity)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map (Map)
 import Data.Map.Monoidal (MonoidalMap)
@@ -83,38 +85,42 @@ import qualified Graphics.Vty.Input.Events as Vty
 -- | From 'Brick.Widgets.Edit.handleEditorEvent'
 handleEditorEvent ::
   Reflex t =>
-  EventSelector t RBVtyEvent -> -- ^ terminal events
+  Event t ([Vty.Modifier], DMap RBKey Identity) -> -- ^ Terminal key events
   Event t (Editor Text n -> Editor Text n)
 handleEditorEvent e = (editContentsL %~) <$> eModify
   where
-    evkey c ms op =
+    keyEvents =
+      fan $
       fmapMaybe
-        (\ms' -> if ms' == ms then Just op else Nothing)
-        (select e $ RBKey c)
+        (\(ms, d) -> if null ms then Just d else Nothing)
+        e
+
+    ctrlEvents =
+      fan $
+      fmapMaybe
+        (\(ms, d) -> if ms == [Vty.MCtrl] then Just d else Nothing)
+        e
 
     eModify =
       mergeWith (.)
-      [ evkey (Vty.KChar 'a') [Vty.MCtrl] Zipper.gotoBOL
-      , evkey (Vty.KChar 'e') [Vty.MCtrl] Zipper.gotoEOL
-      , evkey (Vty.KChar 'd') [Vty.MCtrl] Zipper.deleteChar
-      , evkey (Vty.KChar 'k') [Vty.MCtrl] Zipper.killToEOL
-      , evkey (Vty.KChar 'u') [Vty.MCtrl] Zipper.killToBOL
-      , evkey Vty.KEnter [] Zipper.breakLine
-      , evkey Vty.KDel [] Zipper.deleteChar
+      [ Zipper.gotoBOL <$ select ctrlEvents (RBChar 'a')
+      , Zipper.gotoEOL <$ select ctrlEvents (RBChar 'e')
+      , Zipper.deleteChar <$ select ctrlEvents (RBChar 'd')
+      , Zipper.killToEOL <$ select ctrlEvents (RBChar 'k')
+      , Zipper.killToBOL <$ select ctrlEvents (RBChar 'u')
+      , Zipper.breakLine <$ select keyEvents RBEnter
+      , Zipper.deleteChar <$ select keyEvents RBDel
       , fmapMaybe
-          (\(k, ms) ->
-             case k of
-               Vty.KChar c ->
-                 if null ms && c /= '\t'
-                 then Just (Zipper.insertChar c)
-                 else Nothing
-               _ -> Nothing)
-          (select e RBAnyKey)
-      , evkey Vty.KUp [] Zipper.moveUp
-      , evkey Vty.KDown [] Zipper.moveDown
-      , evkey Vty.KLeft [] Zipper.moveLeft
-      , evkey Vty.KRight [] Zipper.moveRight
-      , evkey Vty.KBS [] Zipper.deletePrevChar
+          (\c ->
+             if c /= '\t'
+             then Just $ Zipper.insertChar c
+             else Nothing)
+          (select keyEvents RBAnyChar)
+      , Zipper.moveUp <$ select keyEvents RBUp
+      , Zipper.moveDown <$ select keyEvents RBDown
+      , Zipper.moveLeft <$ select keyEvents RBLeft
+      , Zipper.moveRight <$ select keyEvents RBRight
+      , Zipper.deletePrevChar <$ select keyEvents RBBS
       ]
 
 data FormField t n e a
@@ -163,101 +169,98 @@ dynFocusRing ePrev eNext fs = do
     initial
     (mergeWith (\_ _ -> id) [focusPrev <$ ePrev, focusNext <$ eNext])
 
-data Form t n e m a where
-  FormPure :: a -> Form t n e m a
-  FormMap :: (a -> b) -> Form t n e m a -> Form t n e m b
+data  Form t n ev e m a where
+  FormPure :: a ->  Form t n ev e m a
+  FormMap :: (a -> b) ->  Form t n ev e m a ->  Form t n ev e m b
   FormLift ::
-    (EventSelector t RBVtyEvent ->
-     Dynamic t (Maybe n) ->
+    (Dynamic t (Maybe n) ->
      m (FormField t n e a)) ->
-    Form t n e m a
-  FormStyle :: (Widget n -> Widget n) -> Form t n e m a -> Form t n e m a
-  FormVert :: Form t n e m (a -> b) -> Form t n e m a -> Form t n e m b
-  FormHoriz :: Form t n e m (a -> b) -> Form t n e m a -> Form t n e m b
+     Form t n ev e m a
+  FormStyle :: (Widget n -> Widget n) ->  Form t n ev e m a ->  Form t n ev e m a
+  FormVert ::  Form t n ev e m (a -> b) ->  Form t n ev e m a ->  Form t n ev e m b
+  FormHoriz ::  Form t n ev e m (a -> b) ->  Form t n ev e m a ->  Form t n ev e m b
 
-instance Functor (Form t n e m) where; fmap = FormMap
+instance Functor ( Form t n ev e m) where; fmap = FormMap
 
 -- | Horizontal apply
-(<*>+) :: Form t n e m (a -> b) -> Form t n e m a -> Form t n e m b
+(<*>+) ::  Form t n ev e m (a -> b) ->  Form t n ev e m a ->  Form t n ev e m b
 (<*>+) = FormHoriz
 infixl 4 <*>+
 
 -- | Horizontal left-apply
-(<*+) :: Form t n e m a -> Form t n e m b -> Form t n e m a
+(<*+) ::  Form t n ev e m a ->  Form t n ev e m b ->  Form t n ev e m a
 (<*+) a b = const <$> a <*>+ b
 infixl 4 <*+
 
 -- | Horizontal right-apply
-(*>+) :: Form t n e m a -> Form t n e m b -> Form t n e m b
+(*>+) ::  Form t n ev e m a ->  Form t n ev e m b ->  Form t n ev e m b
 (*>+) a b = const id <$> a <*>+ b
 infixl 4 *>+
 
 -- | Vertical apply
-(<*>=) :: Form t n e m (a -> b) -> Form t n e m a -> Form t n e m b
+(<*>=) ::  Form t n ev e m (a -> b) ->  Form t n ev e m a ->  Form t n ev e m b
 (<*>=) = FormVert
 infixl 4 <*>=
 
 -- | Vertical left-apply
-(<*=) :: Form t n e m a -> Form t n e m b -> Form t n e m a
+(<*=) ::  Form t n ev e m a ->  Form t n ev e m b ->  Form t n ev e m a
 (<*=) a b = const <$> a <*>= b
 infixl 4 <*=
 
 -- | Vertical right-apply
-(*>=) :: Form t n e m a -> Form t n e m b -> Form t n e m b
+(*>=) ::  Form t n ev e m a ->  Form t n ev e m b ->  Form t n ev e m b
 (*>=) a b = const id <$> a <*>= b
 infixl 4 *>=
 
 fieldM ::
-  (EventSelector t RBVtyEvent ->
-   Dynamic t (Maybe n) ->
+  (Dynamic t (Maybe n) ->
    m (FormField t n e a)) ->
-  Form t n e m a
+   Form t n ev e m a
 fieldM = FormLift
 
-field :: Applicative m => FormField t n e a -> Form t n e m a
-field f = fieldM (\_ _ -> pure f)
+field :: Applicative m => FormField t n e a -> Form t n ev e m a
+field f = fieldM (\_ -> pure f)
 
 -- |
 -- Use a transformation function to change the way a 'Form' is rendered
-styled :: (Widget n -> Widget n) -> Form t n e m a -> Form t n e m a
+styled :: (Widget n -> Widget n) ->  Form t n ev e m a ->  Form t n ev e m a
 styled = FormStyle
 
 -- | Infix operator for 'styled'
-(@@=) :: (Widget n -> Widget n) -> Form t n e m a -> Form t n e m a
+(@@=) :: (Widget n -> Widget n) ->  Form t n ev e m a ->  Form t n ev e m a
 (@@=) = styled
 
 infixr 5 @@=
 
 -- | Lay out 'Form's left-to-right, collecting their results
-besides :: [Form t n e m a] -> Form t n e m [a]
+besides :: [ Form t n ev e m a] ->  Form t n ev e m [a]
 besides [] = FormPure []
 besides (f : fs) = FormHoriz (FormMap (:) f) (besides fs)
 
 -- | Lay out 'Form's top-to-bottom, collecting their results
-aboves :: [Form t n e m a] -> Form t n e m [a]
+aboves :: [ Form t n ev e m a] ->  Form t n ev e m [a]
 aboves [] = FormPure []
 aboves (f : fs) = FormVert (FormMap (:) f) (aboves fs)
 
 makeForm ::
-  forall e t n m a.
+  forall e t n ev m a.
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n, Semigroup e
   ) =>
-  EventSelector t RBVtyEvent -> -- ^ terminal input events
-  AttrMap -> -- ^ styling
-  Event t () -> -- ^ cycle forward through form
-  Event t () -> -- ^ cycle forward through form
-  Form t n e m a -> -- ^ the form
+  AttrMap -> -- ^ Styling
+  Event t () -> -- ^ Cycle backward through form
+  Event t () -> -- ^ Cycle forward through form
+  Form t n ev e m a -> -- ^ The form
   m
     ( Dynamic t a
     , Dynamic t (Validation (Map n e) a)
     , Dynamic t (Maybe n)
     , Dynamic t (ReflexBrickAppState n)
     )
-makeForm eVtyEvent style ePrev eNext form = do
+makeForm style ePrev eNext form = do
   rec
     let dFocus = focusGetCurrent <$> dFocusRing
-    ff <- runReaderT (go form) (eVtyEvent, dFocus)
+    ff <- runReaderT (go form) dFocus
     dFocusRing <- dynFocusRing ePrev eNext $ _fieldNames ff
   pure $
     ( _fieldData ff
@@ -275,12 +278,11 @@ makeForm eVtyEvent style ePrev eNext form = do
   where
     go ::
       forall x.
-      Form t n e m x ->
-      ReaderT (EventSelector t RBVtyEvent, Dynamic t (Maybe n)) m (FormField t n e x)
+       Form t n ev e m x ->
+      ReaderT (Dynamic t (Maybe n)) m (FormField t n e x)
     go (FormPure a) = pure $ emptyField a
     go (FormMap f ma) = fmap f <$> go ma
-    go (FormLift ma) = do
-      ask >>= lift . uncurry ma
+    go (FormLift ma) = ask >>= lift . ma
     go (FormStyle f ma) = do
       a <- go ma
       pure $ a & fieldWidget.mapped %~ f
@@ -288,24 +290,24 @@ makeForm eVtyEvent style ePrev eNext form = do
     go (FormHoriz mf ma) = combineFieldsWith (<+>) <$> go mf <*> go ma
 
 textFieldBase ::
-  forall t n e m.
+  forall t n ev e m.
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n, Show n
   ) =>
-  ([Text] -> Widget n) -> -- ^ how to render contents
-  n -> -- ^ widget name (must be unique)
-  Maybe Text -> -- ^ initial contents
-  Maybe Int -> -- ^ line limit
-  ([Text] -> Validation e [Text]) -> -- ^ validation function
-  EventSelector t RBVtyEvent -> -- ^ terminal events
-  Dynamic t (Maybe n) -> -- ^ current focus
+  ([Text] -> Widget n) -> -- ^ How to render contents
+  n -> -- ^ Widget name (must be unique)
+  Maybe Text -> -- ^ Initial contents
+  Maybe Int -> -- ^ Line limit
+  ([Text] -> Validation e [Text]) -> -- ^ Validation function
+  EventSelector t (RBEvent n ev) -> -- ^ Terminal events
+  Dynamic t (Maybe n) -> -- ^ Current focus
   m (FormField t n e [Text])
 textFieldBase renderLines name def limit validate eVtyEvent dFocus = do
   let initial = editorText name limit (fromMaybe mempty def)
   dInFocus <- holdUniqDyn $ (== Just name) <$> dFocus
   dEditor <-
     foldDyn ($) initial $
-    gate (current dInFocus) (handleEditorEvent eVtyEvent)
+    gate (current dInFocus) (handleEditorEvent $ select eVtyEvent RBKey)
   let dData = getEditContents <$> dEditor
   pure $
     FormField
@@ -321,16 +323,16 @@ textFieldBase renderLines name def limit validate eVtyEvent dFocus = do
     addStyle focus = if focus then withDefAttr focusedFormInputAttr else id
 
 textField ::
-  forall t n e m.
+  forall t n ev e m.
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n, Show n
   ) =>
-  n -> -- ^ widget name (must be unique)
-  Maybe Text -> -- ^ initial contents
-  Maybe Int -> -- ^ line limit
-  ([Text] -> Validation e [Text]) -> -- ^ validation function
-  EventSelector t RBVtyEvent -> -- ^ terminal events
-  Dynamic t (Maybe n) -> -- ^ current focus
+  n -> -- ^ Widget name (must be unique)
+  Maybe Text -> -- ^ Initial contents
+  Maybe Int -> -- ^ Line limit
+  ([Text] -> Validation e [Text]) -> -- ^ Validation function
+  EventSelector t (RBEvent n ev) -> -- ^ Terminal events
+  Dynamic t (Maybe n) -> -- ^ Current focus
   m (FormField t n e [Text])
 textField name def limit =
   textFieldBase
@@ -340,15 +342,15 @@ textField name def limit =
     limit
 
 passwordField ::
-  forall t n e m.
+  forall t n ev e m.
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n, Show n
   ) =>
-  n -> -- ^ widget name (must be unique)
-  Maybe Text -> -- ^ initial contents
-  (Text -> Validation e Text) -> -- ^ validation function
-  EventSelector t RBVtyEvent -> -- ^ terminal events
-  Dynamic t (Maybe n) -> -- ^ current focus
+  n -> -- ^ Widget name (must be unique)
+  Maybe Text -> -- ^ Initial contents
+  (Text -> Validation e Text) -> -- ^ Validation function
+  EventSelector t (RBEvent n ev) -> -- ^ Terminal events
+  Dynamic t (Maybe n) -> -- ^ Current focus
   m (FormField t n e Text)
 passwordField name def validate eVtyEvent =
   (fmap Text.concat <$>) .
@@ -366,18 +368,17 @@ radioField ::
   ( Reflex t, MonadHold t m
   , Eq n
   ) =>
-  NonEmpty (n, a, Text) -> -- ^ selections
-  EventSelector t RBVtyEvent -> -- ^ terminal events
-  Dynamic t (Maybe n) -> -- ^ current focus
+  NonEmpty (n, a, Text) -> -- ^ Selections
+  Event t () -> -- ^ Select event
+  Dynamic t (Maybe n) -> -- ^ Current focus
   m (FormField t n e a)
-radioField choices eVtyEvent dFocus = do
+radioField choices eSelect dFocus = do
   let
     names = foldr (\a b -> (^.) a _1 : b) [] choices
     initial = let x = NonEmpty.head choices in (x ^. _1, x ^. _2)
-    eSpace = select eVtyEvent (RBKey $ Vty.KChar ' ')
 
   let dHighlighted = (>>= \n -> (,) n <$> lookupValue n choices) <$> dFocus
-  dSelected <- holdDyn initial $ attachWithMaybe const (current dHighlighted) eSpace
+  dSelected <- holdDyn initial $ attachWithMaybe const (current dHighlighted) eSelect
 
   let dData = (^. _2) <$> dSelected
 
@@ -413,14 +414,12 @@ checkboxField ::
   ( Reflex t, MonadHold t m, MonadFix m
   , Eq n
   ) =>
-  n -> -- ^ name
-  Text -> -- ^ label
-  EventSelector t RBVtyEvent -> -- ^ terminal events
-  Dynamic t (Maybe n) -> -- ^ current focus
+  n -> -- ^ Name
+  Text -> -- ^ Label
+  Event t () -> -- ^ Select events
+  Dynamic t (Maybe n) -> -- ^ Current focus
   m (FormField t n e Bool)
-checkboxField name label eVtyEvent dFocus = do
-  let eSpace = select eVtyEvent (RBKey $ Vty.KChar ' ')
-
+checkboxField name label eSelect dFocus = do
   let dHighlighted = (==Just name) <$> dFocus
   rec
     dChecked <-
@@ -430,7 +429,7 @@ checkboxField name label eVtyEvent dFocus = do
       attachWithMaybe
         (\h _ -> guard h)
         (current dHighlighted)
-        eSpace)
+        eSelect)
 
   pure $
     FormField
@@ -455,14 +454,13 @@ listField ::
   ( Reflex t, MonadHold t m, MonadFix m
   , Ord n
   ) =>
-  [(n, Text, a)] -> -- ^ choices
-  EventSelector t RBVtyEvent -> -- ^ terminal events
-  Dynamic t (Maybe n) -> -- ^ current focus
+  [(n, Text, a)] -> -- ^ Choices
+  Event t () -> -- ^ Selection event
+  Dynamic t (Maybe n) -> -- ^ Current focus
   m (FormField t n e [a])
-listField choices eVtyEvent eFocus = do
+listField choices eSelect eFocus = do
   let
     names = fmap (\(x, _, _) -> x) choices
-    eSpace = select eVtyEvent . RBKey $ Vty.KChar ' '
 
     dSelected = (>>= \n -> if n `elem` names then Just n else Nothing) <$> eFocus
     dInFocus = isJust <$> dSelected
@@ -479,7 +477,7 @@ listField choices eVtyEvent eFocus = do
              else Set.insert ix ixs) <$>
       current dSelected <*>
       current dIxs <@
-      gate (current dInFocus) eSpace
+      gate (current dInFocus) eSelect
 
   let
     dData =
@@ -523,12 +521,12 @@ makeButton ::
   ) =>
   n -> -- ^ name
   Text -> -- ^ value
-  EventSelector t RBVtyEvent -> -- ^ terminal inputs
-  Dynamic t (Maybe n) -> -- ^ current focus
+  Event t () -> -- ^ Button pressed event
+  Dynamic t (Maybe n) -> -- ^ Current focus
   m (Event t (), FormField t n e ())
-makeButton name value eVtyEvent dFocus =
+makeButton name value ePressed dFocus =
   pure
-  ( gate ((==Just name) <$> current dFocus) eEnter
+  ( gate ((==Just name) <$> current dFocus) ePressed
   , FormField
     { _fieldData = pure ()
     , _fieldWidget =
@@ -543,8 +541,6 @@ makeButton name value eVtyEvent dFocus =
       if b
       then withDefAttr focusedFormInputAttr
       else id
-
-    eEnter = () <$ select eVtyEvent (RBKey Vty.KEnter)
 
 onSuccess :: Reflex t => Dynamic t (Validation e a) -> Event t b -> Event t a
 onSuccess =

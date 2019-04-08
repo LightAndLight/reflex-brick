@@ -39,7 +39,6 @@ import Lens.Micro ((%~), _last)
 
 import qualified Data.Text as Text
 import qualified Graphics.Vty.Attributes as Vty
-import qualified Graphics.Vty.Input.Events as Vty
 
 data FormId
   = FormName
@@ -69,27 +68,29 @@ network ::
   m (ReflexBrickApp t FormId)
 network eEvent = do
   let
-    eVtyEvent = fan $ select eEvent RBAnyVtyEvent
-    ePrev =
+    eKeyEvents =
+      fan $
       fmapMaybe
-        (guard . null)
-        (select eEvent (RBVtyEvent . RBKey $ Vty.KBackTab))
-    eNext =
-      fmapMaybe
-        (guard . null)
-        (select eEvent (RBVtyEvent . RBKey $ Vty.KChar '\t'))
+        (\(ms, k) -> k <$ guard (null ms))
+        (select eEvent RBKey)
+
+    eSpace = () <$ select eKeyEvents (RBChar ' ')
+    eEnter = () <$ select eKeyEvents RBEnter
+
+    ePrev = () <$ select eKeyEvents RBBackTab
+    eNext = () <$ select eKeyEvents (RBChar '\t')
 
   rec
-    (eSubmit, button) <- makeButton FormSubmit "submit" eVtyEvent dFocus
+    (eSubmit, button) <- makeButton FormSubmit "submit" eEnter dFocus
     (dData, dValidated, dFocus, dAppState) <-
-      makeForm @() eVtyEvent styling ePrev eNext $
+      makeForm @() styling ePrev eNext $
       (,,,,) <$>
-      border @@= fieldM (textField FormName Nothing (Just 1) Success) <*>=
-      border @@= fieldM (passwordField FormPassword Nothing Success) <*>=
+      border @@= fieldM (textField FormName Nothing (Just 1) Success eEvent) <*>=
+      border @@= fieldM (passwordField FormPassword Nothing Success eEvent) <*>=
       padBottom (Pad 1) @@=
-        fieldM (radioField [(FormX, X, "X"), (FormY, Y, "Y"), (FormZ, Z, "Z")]) <*>=
-      fieldM (checkboxField FormQuestion "???") <*>=
-      fieldM (listField [(FormListX, "X", X), (FormListY, "Y", Y), (FormListZ, "Z", Z)]) <*=
+        fieldM (radioField [(FormX, X, "X"), (FormY, Y, "Y"), (FormZ, Z, "Z")] eSpace) <*>=
+      fieldM (checkboxField FormQuestion "???" eSpace) <*>=
+      fieldM (listField [(FormListX, "X", X), (FormListY, "Y", Y), (FormListZ, "Z", Z)] eSpace) <*=
       field button
 
   let eQuit = () <$ onSuccess dValidated eSubmit
@@ -109,4 +110,4 @@ network eEvent = do
     }
 
 main :: IO ()
-main = runReflexBrickApp @FormId (pure ()) Nothing network
+main = runReflexBrickApp @FormId (pure ()) network
